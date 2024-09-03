@@ -10,6 +10,9 @@ same filesystem; or in a container or snap.
 
 from functools import cached_property
 import ast
+import errno
+import os
+import shutil
 import subprocess
 import sys
 
@@ -117,6 +120,172 @@ from ansible_collections.epfl_si.actions.plugins.module_utils import postconditi
             "True" if check_mode else "False")
 
 
+class TmpFilesystemBase:
+    """Abstract base class for a bunch of temporary files that Ansible will be needing.
+
+    Under this same abstract base class, one can have implementations
+    targeted for “trivial“ file systems, in which `copy_file` does
+    nothing because the target Python process will share the same file
+    namespace; as well as complex cases (i.e. containers) in which
+    path translation is required.
+    """
+    def __init__ (self):
+        self.files_to_cleanup = []
+
+    def copy_file (self, from_path):
+        """Create (or borrow) `from_path` into the target file system.
+
+        Returns: The path that the Python process should use to refer
+        to that file.
+        """
+        raise NotImplementedError
+
+    def make_file (self, stem, bytes):
+        """Create a new, temporary file.
+
+        Returns: The path from inside the container (if any) that the
+        Python process should use to refer to the file.
+        """
+        raise NotImplementedError
+
+    def note_file_created (self, path):
+        """Remember one file for (the base class implementation of) `cleanup()`."""
+        self.files_to_cleanup.append(path)
+
+    def cleanup (self):
+        """Delete any and all files created with `copy_file` and `make_file`.
+
+        The base class calls `self.cleanup_one_file()` on all files
+        remembered by `note_file_created()`. Override in a subclass if
+        you want a “stateless” way to delete all files, e.g. because
+        they are all stored under the same, temporary directory.
+        """
+        for path in self.files_to_cleanup:
+            self.cleanup_one_file(path)
+
+    def cleanup_one_file (self, path):
+        """Called by (the base class' implementation of) `cleanup()`."""
+        raise NotImplementedError
+
+    @classmethod
+    def filenames_like (cls, stem):
+        """Yields an infinite series of file names, all different, that ressemble `stem`."""
+        yield stem
+        (root, suffix) = os.path.splitext(stem)
+        counter = 1
+        while True:
+             yield '%s_%d%s' % (root, counter, suffix)
+             counter = counter + 1
+
+
+class BasicTmpFilesystem (TmpFilesystemBase):
+    """The simplest possible implementation of TmpFilesystemBase.
+
+    `copy_file() does nothing; `make_file` creates and returns files
+    with unique names under the `tmpdir` constructor argument,
+    defaulting to the current directory.
+    """
+
+    def __init__ (self, tmpdir=None):
+        super().__init__()
+        self.tmpdir = tmpdir if tmpdir is not None else os.path.curdir
+
+    def copy_file (self, from_path):
+        """Do nothing; just return `from_path`.
+
+        That is, assume that no copying is necessary (i.e. because the
+        forked Python process will have access to `from_path` under
+        the same path).
+        """
+        return from_path
+
+    def make_file (self, stem, bytes):
+        """Create a file named after `stem`; remember to clean it up."""
+
+        stem = os.path.join(self.tmpdir, stem)
+        for path in self.filenames_like(stem):
+            with let_EEXIST_slide:
+                with open(path, "xb") as fd:
+                    fd.write(bytes)
+                self.note_file_created(path)
+                return path
+
+    def cleanup_one_file (self, path):
+        os.unlink(path)
+
+
+class _SwallowEEXISTContextManager:
+    def __enter__ (self):
+        return self
+
+    def __exit__ (self, exn_type, exn_value, exn_tb):
+        if not exn_type:
+            return True
+        else:
+            return isinstance(exn_value, OSError) and exn_value.errno == errno.EEXIST
+
+let_EEXIST_slide = _SwallowEEXISTContextManager()
+
+
+class TmpdirFilesystem (TmpFilesystemBase):
+    """A filesystem where all temporary files are in the same directory."""
+    def __init__ (self, tmpdir_base):
+        self.tmpdir_base = tmpdir_base
+        self.__has_tmpdir = False
+
+    @cached_property
+    def tmpdir (self):
+        for path in self.filenames_like(os.path.join(self.tmpdir_base, ".ansible_tmp")):
+            with let_EEXIST_slide:
+                os.mkdir(path)
+                self.__has_tmpdir = True
+                return path
+
+    def cleanup (self):
+        if self.__has_tmpdir:
+            shutil.rmtree(self.tmpdir)
+
+    def copy_file (self, from_path):
+        with open(from_path, "rb") as fd:
+            slurped_bytes = fd.read()
+        return self.make_file(os.path.basename(from_path), slurped_bytes)
+
+    def make_file (self, stem, bytes):
+        for path in self.filenames_like(os.path.join(self.tmpdir, stem)):
+            with let_EEXIST_slide:
+                with open(path, "xb") as fd:
+                    fd.write(bytes)
+                    return path
+
+
+class MountedVolumeTmpFilesystem (TmpFilesystemBase):
+    """A temporary filesystem that is visible as a mounted subdirectory of the currently accessible filesystem."""
+    def __init__ (self, mountpoint, tmpdir_rel_path):
+        while mountpoint.endswith("/"):
+            mountpoint = mountpoint[:-1]
+        self.mountpoint = mountpoint
+        self.tmp = TmpdirFilesystem(os.path.join(mountpoint, tmpdir_rel_path))
+
+    def translate_path_outside (self, path_inside):
+         # No os.path.join, as path might be absolute:
+        return '%s/%s' % (self.mountpoint, path)
+
+    def translate_path_inside (self, path_outside):
+        if not path_outside.startswith(self.mountpoint):
+            return ValueError
+
+        return path_outside[len(self.mountpoint):]
+
+    def copy_file (self, path_outside):
+        return self.translate_path_inside(self.tmp.copy_file(path_outside))
+
+    def make_file (self, stem, bytes):
+        return self.translate_path_inside(self.tmp.make_file(stem, bytes))
+
+    def cleanup (self):
+        self.tmp.cleanup()
+
+
 class ForkedRunnerBase:
     """Base class for a runner that runs the user script in a forked Python interpreter.
 
@@ -131,16 +300,28 @@ class ForkedRunnerBase:
     which is where the framework-specific incantations should come in
     (e.g. importing and calling `execute_from_command_line()` for
     Django).
+
+    The `fs` attribute is initialized to an instance of
+    `BasicTmpFilesystem()`. In order to e.g. use a Python interpreter
+    running in a container or snap, set it to a different
+    `TmpFilesystemBase` instance immediately after construction.
     """
     def __init__ (self, script, check_mode):
         self.script = script
         self.check_mode = check_mode
+        self.fs = BasicTmpFilesystem()
 
+    def ansiballz_payload_zip_paths (self):
+        return [p for p in sys.path
+                if "ansible" in p and p.endswith(".zip")]
+
+    @cached_property
+    def copied_ansiballz_payloads (self):
+        return [self.fs.copy_file(p) for p in self.ansiballz_payload_zip_paths()]
     def python_fragment_set_ansiballz_sys_path (self):
         fragment = "import sys\n"
-        for p in sys.path:
-            if p.endswith(".zip"):
-                fragment = fragment + "sys.path.insert(0, '''%s''')\n" % p
+        for p in self.copied_ansiballz_payloads:
+            fragment = fragment + "sys.path.insert(0, '''%s''')\n" % p
         return fragment
 
     def python_script_multiline_string (self):
@@ -185,6 +366,7 @@ print(json.dumps(result))
         p = subprocess.run(
             args=self.python_subprocess_args(),
             check=False)
+        self.fs.cleanup()
         sys.exit(p.returncode)
 
 
@@ -216,4 +398,8 @@ class PythonFrameworkActionBase:
     def run (self):
         runner = self.build_runner(self.framework_script,
                                    check_mode=self.module.check_mode)
+
+        if hasattr(runner, "set_tmpdir"):
+            runner.set_tmpdir(self.module.tmpdir)
+
         runner.run_and_exit()
