@@ -310,6 +310,7 @@ class ForkedRunnerBase:
         self.script = script
         self.check_mode = check_mode
         self.fs = BasicTmpFilesystem()
+        self.inhibit_cleanup = False
 
     def ansiballz_payload_zip_paths (self):
         return [p for p in sys.path
@@ -366,7 +367,8 @@ print(json.dumps(result))
         p = subprocess.run(
             args=self.python_subprocess_args(),
             check=False)
-        self.fs.cleanup()
+        if not self.inhibit_cleanup:
+            self.fs.cleanup()
         sys.exit(p.returncode)
 
 
@@ -401,5 +403,8 @@ class PythonFrameworkActionBase:
 
         if hasattr(runner, "set_tmpdir"):
             runner.set_tmpdir(self.module.tmpdir)
+
+        if self.module._keep_remote_files:
+            runner.inhibit_cleanup = True
 
         runner.run_and_exit()
