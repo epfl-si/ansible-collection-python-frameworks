@@ -262,16 +262,37 @@ class TmpdirFilesystem (TmpFilesystemBase):
 class MountedVolumeTmpFilesystem (TmpFilesystemBase):
     """A temporary filesystem that is visible as a mounted subdirectory of the currently accessible filesystem."""
     def __init__ (self, mountpoint, tmpdir_rel_path):
+        """Initialize the filesystem instance.
+
+        @param {string} mountpoint
+
+           The path prefix that methods `translate_path_outside` resp.
+           `translate_path_inside` will add resp. subtract
+
+        @param {string} tmpdir_rel_path
+
+            The directory in which this class will create `.ansible/`,
+            `.ansible_1/` etc. temporary subdirectories to host the
+            files it creates. For instance, if `mountpoint` is
+            `/var/snap/maas/current` and `tmpdir_rel_path` is `root`,
+            this class will create temporary subdirectories
+            `/var/snap/maas/current/root/.ansible`,
+            `/var/snap/maas/current/root/.ansible_1`,
+            `/var/snap/maas/current/root/.ansible_2` etc (whichever
+            doesn't already exist)
+        """
         while mountpoint.endswith("/"):
             mountpoint = mountpoint[:-1]
         self.mountpoint = mountpoint
         self.tmp = TmpdirFilesystem(os.path.join(mountpoint, tmpdir_rel_path))
 
     def translate_path_outside (self, path_inside):
+        """Translate `path_outside` into the corresponding path as seen from inside the mounted volume."""
          # No os.path.join, as path might be absolute:
         return '%s/%s' % (self.mountpoint, path)
 
     def translate_path_inside (self, path_outside):
+        """Translate `path_inside` into the corresponding path as seen from outside the mounted volume."""
         if not path_outside.startswith(self.mountpoint):
             return ValueError
 
