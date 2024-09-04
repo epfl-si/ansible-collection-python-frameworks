@@ -105,3 +105,8 @@ collection.
 ⑧ `self.python_script_multiline_string()` doesn't just spit out the user script as-is; running that would not do much (since as you can see, it just defines a class, and exits). Rather, the runner's `.python_script_multiline_string()` (with help from the action class, coming up next; and more `*Runnable*` classes that are not shown here) automagically weaves the user script into some prologue and epilogue code that is required to actually run the task.
 
 ⑨ The `PythonFrameworkActionBase` provides you with the module's main entry point. It innately knows that user scripts passed as a `postcondition_class` need such-and-such Python wrappage (see ⑧, above); and it orchestrates the creation of all the other objects, starting at the `runner_class` that is set on the next line.
+
+# Planned Features
+
+- Support for imperative (not `PostconditionBase`-based) scripts that manipulate the Ansible return structure directly
+- In-process use case (required by [wp-ops](https://github.com/epfl-si/wp-ops)' [awx_script](https://github.com/epfl-si/wp-ops/blob/master/ansible/roles/awx-instance/library/awx_script.py))
