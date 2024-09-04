@@ -19,23 +19,24 @@ import sys
 from ansible.module_utils.basic import AnsibleModule
 
 
-class ParserBase:
-    """Abstract base class for framework scripts.
+class RunnableBase:
+    """Abstract base class for making sense of user scripts (parsing, slicing them).
 
-    As the sole constructor argument, a subclass receive a **user
-    script**, i.e. a snippet of Python (as a string) that typically
-    comes directly from the action's YAML code in a play. The job of
-    said subclass is to make sense of the script in a way that allows
-    to run it.
+    As the sole constructor argument, an instance of a RunnableBase
+    subclass receives a **user script**, i.e. a snippet of Python (as
+    a string) that typically comes directly from the action's YAML
+    code in a play. The job of said subclass is to make sense of the
+    script in a way that allows a `*Runner*` object to run it.
 
     Responsibilities of subclass **do not** include spawning a
     subprocess or straight `import`ing and calling frameworks. That is
-    the job of one of the `*Runner` classes in the same module.
+    the job of one of the `*Runner*` classes in the same module.
 
     Concrete subclasses should parse `self.python_code_string` in the
     constructor, so as both to validate that user script complies with
     whatever format is expected by the parser; and work out the values
     returned by `python_fragment_*` and `python_expression_*` methods.
+
     """
     def __init__ (self, python_code_string):
         self.python_code_string = python_code_string
@@ -61,10 +62,10 @@ class ParserBase:
         raise NotImplementedError
 
 
-class PostconditionParser (ParserBase):
-    """A parser that expects the user script to be implemented as a PostconditionBase subclass.
+class PostconditionRunnable (RunnableBase):
+    """A user script implemented as a PostconditionBase subclass.
 
-The script should go something like this:
+The script passed to the constructor should go something like this:
 
       from ansible_collections.epfl_si.actions.plugins.module_utils.postconditions import Postcondition as PostconditionBase
 
@@ -389,16 +390,16 @@ class PythonFrameworkActionBase:
             supports_check_mode=True)
 
     @cached_property
-    def framework_script (self):
+    def runnable (self):
         # TODO: support imperative (Postcondition-less) scripts here too
-        return PostconditionParser(
+        return PostconditionRunnable(
             self.module.params['postcondition_class'])
 
     def build_runner (self, script, check_mode):
         return self.runner_class(script, check_mode)
 
     def run (self):
-        runner = self.build_runner(self.framework_script,
+        runner = self.build_runner(self.runnable,
                                    check_mode=self.module.check_mode)
 
         if hasattr(runner, "set_tmpdir"):
