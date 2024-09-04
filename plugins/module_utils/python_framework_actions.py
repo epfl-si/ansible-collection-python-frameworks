@@ -365,11 +365,13 @@ print(json.dumps(result))
         This means printing the Ansible outcome structure to standard
         output as JSON, and exiting.
         """
-        p = subprocess.run(
-            args=self.python_subprocess_args(),
-            check=False)
-        if not self.inhibit_cleanup:
-            self.fs.cleanup()
+        try:
+            p = subprocess.run(
+                args=self.python_subprocess_args(),
+                check=False)
+        finally:
+            if not self.inhibit_cleanup:
+                self.fs.cleanup()
         sys.exit(p.returncode)
 
 
